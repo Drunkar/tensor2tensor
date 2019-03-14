@@ -1,6 +1,6 @@
 # Tensor2Tensor-Optuna
 
-![tensorboard_image](docs/images/2019/03/tensorboard_image.png)
+![tensorboard_image](https://github.com/Drunkar/tensor2tensor-optuna/blob/v1.10.0-optuna/docs/images/tensorboard_image.png?raw=true)
 
 - Hyperparameter tuning with [Optuna][7632cb70] integrated tensor2tensor.
 - This repository is a fork of tensor2tensor v1.10.0.
