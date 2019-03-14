@@ -1,3 +1,126 @@
+# Tensor2Tensor-Optuna
+
+![tensorboard_image](docs/images/2019/03/tensorboard_image.png)
+
+- Hyperparameter tuning with [Optuna][7632cb70] integrated tensor2tensor.
+- This repository is a fork of tensor2tensor v1.10.0.
+- Using [MedianPruner](https://optuna.readthedocs.io/en/stable/reference/pruners.html?highlight=MedianPruner#optuna.pruners.MedianPruner).
+
+  [7632cb70]: https://optuna.org/ "Optuna"
+
+## Installation
+
+```
+git clone clone git@github.com:Drunkar/tensor2tensor-optuna.git
+cd tensor2tensor-optuna
+python setup.py install
+```
+
+
+## Environment setup
+
+- Ubuntu 16.04
+- Anaconda python
+
+```
+conda create -n tensor2tensor python=3.6 anaconda
+conda activate tensor2tensor
+conda install -c anaconda tensorflow-gpu
+pip install optuna
+```
+
+
+## Usage
+
+### Parameters
+
+name  | description | eample
+--|--|--
+optuna_objective| TensorBoard metric name to optimize.| metrics-<problem_name>/targets/accuracy
+optuna_n_trials| Number of trials to search the best result.| 10
+optuna_n_startup_trials|Corresponds to optuna Pruners' parameter `n_startup_trials`.| 3
+optuna_n_warmup_steps|Corresponds to optuna Pruners' parameter `n_warmup_steps`.| 100
+optuna_params_range| Class name of range of parameters to use in optuna.| myhparamsrange
+optuna_is_higher_better| Flag to maximize objective function.| -
+
+
+### Examples
+
+- parameters:
+
+```
+from tensor2tensor.models import transformer
+@registry.register_hparams
+def myhparams():
+  """HParams for transformer base model for single GPU."""
+  hparams = transformer.transformer_base()
+  hparams.batch_size = 1024
+  hparams.learning_rate_schedule = "constant*linear_warmup*rsqrt_decay"
+  hparams.learning_rate_constant = 0.1
+  hparams.learning_rate_warmup_steps = 16000
+  # determined by optuna
+  hparams.learning_rate_constant = 0.06
+  hparams.filter_size = 2048
+  hparams.num_hidden_layers = 3
+  return hparams
+```
+
+- range object
+
+```
+@registry.register_ranged_hparams
+def myhparamsrange(rhp):
+  rhp.set_float("learning_rate", 0.01, 0.2, scale=rhp.LOG_SCALE)
+  rhp.set_discrete("filter_size", [1024, 2048])
+  rhp.set_int("num_hidden_layers", 3, 5)
+  rhp.set_discrete("hidden_size", [128, 256, 512])
+  rhp.set_float("attention_dropout", 0.4, 0.7)
+  rhp.set_float("relu_dropout", 0.4, 0.7)
+```
+
+- trainer command
+
+```
+t2t-trainer \
+  --data_dir=data \
+  --problem=<problem_name> \
+  --model=transformer \
+  --hparams_set=myhparams \
+  --optuna_params_range=myhparamsrange \
+  --optuna_objective=metrics-<problem_name>/targets/accuracy \
+  --optuna_n_trials=10 \
+  --optuna_is_higher_better \
+  --output_dir=<output_dir> \
+  --t2t_usr_dir=<user_dir> \
+  --train_steps=10000
+```
+
+- tensorboard
+
+```
+tensorboard --logdir=<output_dir> --host=localhost --host=0.0.0.0 --port=2222
+```
+
+- decode command (don't forget to define parameters to use in loading model at `myhparams`)
+
+```
+t2t-decoder \
+  --data_dir=data \
+  --problem=<problem_name> \
+  --model=transformer \
+  --hparams_set=myhparams \
+  --output_dir=<output_dir> \
+  --decode_hparams="return_beams=False,beam_size=5,alpha=0.6" \
+  --decode_interactive=true \
+  --t2t_usr_dir=<user_dir>
+```
+
+---
+
+Below are original README.
+
+---
+
 # Tensor2Tensor
 
 [![PyPI

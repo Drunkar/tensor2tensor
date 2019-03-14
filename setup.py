@@ -4,10 +4,10 @@ from setuptools import find_packages
 from setuptools import setup
 
 setup(
-    name='tensor2tensor',
+    name='tensor2tensor-optuna',
     version='1.10.0',
-    description='Tensor2Tensor',
-    author='Google Inc.',
+    description='Tensor2Tensor with hp tuning by optuna',
+    author='Google Inc., Drunkar',
     author_email='no-reply@google.com',
     url='http://github.com/tensorflow/tensor2tensor',
     license='Apache 2.0',
@@ -48,6 +48,7 @@ setup(
         'sympy',
         'six',
         'tqdm',
+        'optuna',
     ],
     extras_require={
         'tensorflow': ['tensorflow>=1.9.0'],

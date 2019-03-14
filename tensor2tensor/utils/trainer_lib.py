@@ -32,6 +32,7 @@ from tensor2tensor.utils import metrics_hook
 from tensor2tensor.utils import mlperf_log
 from tensor2tensor.utils import registry
 from tensor2tensor.utils import t2t_model
+from tensor2tensor.utils.optuna_pruning import TensorFlowPruningHook
 
 import tensorflow as tf
 
@@ -555,6 +556,9 @@ def create_experiment(
     data_dir,
     train_steps,
     eval_steps,
+    optuna_trial,
+    optuna_objective,
+    optuna_is_higher_better,
     min_eval_frequency=2000,
     eval_throttle_seconds=600,
     schedule="train_and_evaluate",
@@ -672,6 +676,17 @@ def create_experiment(
     train_hooks += additional_train_hooks
   if additional_eval_hooks:
     eval_hooks += additional_eval_hooks
+
+  # optuna: define hook
+  optuna_pruning_hook = TensorFlowPruningHook(
+    trial=optuna_trial,
+    estimator=estimator,
+    metric=optuna_objective,
+    is_higher_better=optuna_is_higher_better,
+    run_every_steps=10,
+  )
+  train_hooks.append(optuna_pruning_hook)
+  eval_hooks.append(optuna_pruning_hook)
 
   train_hooks = tf.contrib.learn.monitors.replace_monitors_with_hooks(
       train_hooks, estimator)

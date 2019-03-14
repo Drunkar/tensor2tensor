@@ -18,7 +18,9 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import optuna
 import contextlib
+import copy
 import os
 import sys
 from tensor2tensor import models  # pylint: disable=unused-import
@@ -31,12 +33,15 @@ from tensor2tensor.utils import mlperf_log
 from tensor2tensor.utils import registry
 from tensor2tensor.utils import trainer_lib
 from tensor2tensor.utils import usr_dir
+from tensor2tensor.layers import common_hparams
 import tensorflow as tf
 
 from tensorflow.contrib.tpu.python.tpu import tpu_config
 
 flags = tf.flags
 FLAGS = flags.FLAGS
+
+# TODO: optuna使わない場合のパスを用意する
 
 # See flags.py for additional command-line flags.
 flags.DEFINE_string("t2t_usr_dir", None,
@@ -125,7 +130,19 @@ flags.DEFINE_string("job-dir", None,
 flags.DEFINE_integer("log_step_count_steps", 100,
                      "Number of local steps after which progress is printed "
                      "out")
-
+# Hyperparameter tuning with Optuna
+flags.DEFINE_string("optuna_objective", None,
+                    "TensorBoard metric name to optimize.")
+flags.DEFINE_integer("optuna_n_trials", 1,
+                    "Number of trials to search the best result.")
+flags.DEFINE_integer("optuna_n_startup_trials", 3,
+                    "Corresponds to optuna Pruners' parameter `n_startup_trials`.")
+flags.DEFINE_integer("optuna_n_warmup_steps", 100,
+                    "Corresponds to optuna Pruners' parameter `n_warmup_steps`.")
+flags.DEFINE_string("optuna_params_range", None,
+                    "Range of parameters to use in optuna.")
+flags.DEFINE_bool("optuna_is_higher_better", False,
+                    "default is minimization.")
 
 
 def set_hparams_from_args(args):
@@ -155,24 +172,36 @@ def set_hparams_from_args(args):
   FLAGS.hparams += as_hparams
 
 
-def create_hparams():
+def create_hparams(output_dir):
   """Create hparams."""
   if FLAGS.use_tpu and "tpu" not in FLAGS.hparams_set:
     tf.logging.warn("Not all hyperparameter sets work on TPU. "
                     "Prefer hparams_sets with a '_tpu' suffix, "
                     "e.g. transformer_tpu, if available for your model.")
-  hparams_path = os.path.join(FLAGS.output_dir, "hparams.json")
+  hparams_path = os.path.join(output_dir, "hparams.json")
   return trainer_lib.create_hparams(FLAGS.hparams_set, FLAGS.hparams,
                                     hparams_path=hparams_path)
 
 
-def create_experiment_fn():
+def create_params_range():
+  if FLAGS.optuna_params_range:
+    rhp = common_hparams.RangedHParams()
+    registry.ranged_hparams(FLAGS.optuna_params_range)(rhp)
+    return rhp.to_parameter_specs()
+  else:
+    return []
+
+
+def create_experiment_fn(optuna_trial, optuna_objective, optuna_is_higher_better):
   return trainer_lib.create_experiment_fn(
       model_name=FLAGS.model,
       problem_name=FLAGS.problem,
       data_dir=os.path.expanduser(FLAGS.data_dir),
       train_steps=FLAGS.train_steps,
       eval_steps=FLAGS.eval_steps,
+      optuna_trial=optuna_trial,
+      optuna_objective=optuna_objective,
+      optuna_is_higher_better=optuna_is_higher_better,
       min_eval_frequency=FLAGS.local_eval_frequency,
       schedule=FLAGS.schedule,
       eval_throttle_seconds=FLAGS.eval_throttle_seconds,
@@ -299,9 +328,9 @@ def is_chief():
   return FLAGS.worker_id == 0 and FLAGS.schedule in schedules
 
 
-def save_metadata(hparams):
+def save_metadata(hparams, output_dir):
   """Saves FLAGS and hparams to output_dir."""
-  output_dir = os.path.expanduser(FLAGS.output_dir)
+  output_dir = os.path.expanduser(output_dir)
   if not tf.gfile.Exists(output_dir):
     tf.gfile.MakeDirs(output_dir)
 
@@ -346,39 +375,112 @@ def run_std_server():
   exp.run_std_server()
 
 
+class Objective(object):
+  def __init__(self, argv):
+    self.argv = argv
+
+  def __call__(self, trial):
+    if FLAGS.schedule == "train" or FLAGS.schedule == "train_eval_and_decode":
+      mlperf_log.transformer_print(key=mlperf_log.RUN_START)
+    if FLAGS.schedule == "run_std_server":
+      run_std_server()
+    mlperf_log.transformer_print(
+        key=mlperf_log.RUN_SET_RANDOM_SEED, value=FLAGS.random_seed)
+    trainer_lib.set_random_seed(FLAGS.random_seed)
+    usr_dir.import_usr_dir(FLAGS.t2t_usr_dir)
+    maybe_log_registry_and_exit()
+
+    if FLAGS.cloud_mlengine:
+      cloud_mlengine.launch()
+      return
+
+    if FLAGS.generate_data:
+      generate_data()
+
+    if cloud_mlengine.job_dir():
+      FLAGS.output_dir = cloud_mlengine.job_dir()
+
+    output_dir = FLAGS.output_dir + "/" + str(trial.trial_id)
+
+    if self.argv:
+      set_hparams_from_args(self.argv[1:])
+    hparams = create_hparams(output_dir)
+
+    hparams_range = create_params_range()
+
+    # optuna: update hparams
+    #
+    # example of definitions of range parameters:
+    #     @registry.register_ranged_hparams
+    #     def transformer_conversation_range(rhp):
+    #       rhp.set_float("learning_rate", 0.01, 0.2, scale=rhp.LOG_SCALE)
+    #       rhp.set_int("num_hidden_layers", 2, 4)
+    #       rhp.set_discrete("hidden_size", [128, 256, 512])
+    #       rhp.set_float("attention_dropout", 0.4, 0.7)
+    #
+    # generated hparams_range list:
+    #     [
+    #       {'parameterName': 'hp_hidden_size', 'type': 'DISCRETE', 'discreteValues': [128, 256, 512]},
+    #       {'parameterName': 'hp_learning_rate', 'type': 'DOUBLE', 'minValue': 0.01, 'maxValue': 0.2, 'scaleType': 'UNIT_LOG_SCALE'},
+    #       {'parameterName': 'hp_attention_dropout', 'type': 'DOUBLE', 'minValue': 0.4, 'maxValue': 0.7},
+    #       {'parameterName': 'hp_num_hidden_layers', 'type': 'INTEGER', 'minValue': 2, 'maxValue': 4}
+    #     ]
+    # ----------------------------------------------------------
+    # hparams_range dict -> optuna parameter suggestion
+    # ----------------------------------------------------------
+    # 'type': 'DISCRETE' -> suggest_categorical(name, choices)
+    #        -           -> suggest_discrete_uniform(name, low, high, q)
+    # 'type': 'INTEGER'  -> suggest_int(name, low, high)
+    # 'scaleType': 'UNIT_LOG_SCALE'  -> suggest_loguniform(name, low, high)
+    # 'type': 'DOUBLE' and 'scaleType': 'UNIT_LINEAR_SCALE' -> suggest_uniform(name, low, high)
+    for hpr in hparams_range:
+      hp = hpr["parameterName"]
+      if hparams.get(hp) is None:
+        tf.logging.info("Paramete %s is not in hparams. It will be ignored.", hp)
+        continue
+
+      not_supported = True
+      if hpr["type"] == "DISCRETE":
+        not_supported = False
+        hparams.set_hparam(hp, trial.suggest_categorical(hp, hpr["discreteValues"]))
+      elif hpr["type"] == "INTEGER":
+        not_supported = False
+        hparams.set_hparam(hp, trial.suggest_int(hp, hpr["minValue"], hpr["maxValue"]))
+      elif hpr["type"] == "DOUBLE":
+        if "scaleType" not in hpr or hpr["scaleType"] == "UNIT_LINEAR_SCALE":
+          not_supported = False
+          hparams.set_hparam(hp, trial.suggest_uniform(hp, hpr["minValue"], hpr["maxValue"]))
+        elif hpr["scaleType"] == "UNIT_LOG_SCALE":
+          not_supported = False
+          hparams.set_hparam(hp, trial.suggest_loguniform(hp, hpr["minValue"], hpr["maxValue"]))
+
+      if not_supported:
+        tf.logging.info("Paramete %s is not in hparams. It will be ignored.", hp)
+
+    exp_fn = create_experiment_fn(trial, FLAGS.optuna_objective, FLAGS.optuna_is_higher_better)
+    exp = exp_fn(create_run_config(hparams, output_dir=output_dir), hparams)
+    if is_chief():
+      save_metadata(hparams, output_dir)
+    execute_schedule(exp)
+    if FLAGS.schedule != "train":
+      mlperf_log.transformer_print(key=mlperf_log.RUN_FINAL)
+
+    # get objective
+    eval_metrics = tf.contrib.estimator.read_eval_metrics(exp.estimator.eval_dir())
+    step = next(reversed(eval_metrics))
+    latest_eval_metrics = eval_metrics[step]
+    if FLAGS.optuna_is_higher_better:
+        return 1 - latest_eval_metrics[FLAGS.optuna_objective]
+    else:
+        return latest_eval_metrics[FLAGS.optuna_objective]
+
+
 def main(argv):
   tf.logging.set_verbosity(tf.logging.INFO)
-  if FLAGS.schedule != "train":
-    mlperf_log.transformer_print(key=mlperf_log.RUN_START)
-  if FLAGS.schedule == "run_std_server":
-    run_std_server()
-  mlperf_log.transformer_print(
-      key=mlperf_log.RUN_SET_RANDOM_SEED, value=FLAGS.random_seed)
-  trainer_lib.set_random_seed(FLAGS.random_seed)
-  usr_dir.import_usr_dir(FLAGS.t2t_usr_dir)
-  maybe_log_registry_and_exit()
-
-  if FLAGS.cloud_mlengine:
-    cloud_mlengine.launch()
-    return
-
-  if FLAGS.generate_data:
-    generate_data()
-
-  if cloud_mlengine.job_dir():
-    FLAGS.output_dir = cloud_mlengine.job_dir()
-
-  if argv:
-    set_hparams_from_args(argv[1:])
-  hparams = create_hparams()
-
-  exp_fn = create_experiment_fn()
-  exp = exp_fn(create_run_config(hparams), hparams)
-  if is_chief():
-    save_metadata(hparams)
-  execute_schedule(exp)
-  if FLAGS.schedule != "train":
-    mlperf_log.transformer_print(key=mlperf_log.RUN_FINAL)
+  study = optuna.create_study(pruner=optuna.pruners.MedianPruner(n_startup_trials=FLAGS.optuna_n_startup_trials, n_warmup_steps=FLAGS.optuna_n_warmup_steps))
+  study.optimize(Objective(argv), n_trials=FLAGS.optuna_n_trials)
+  tf.logging.info(study.best_trial)
+  tf.logging.info([t.state for t in study.trials])
 
 
 if __name__ == "__main__":
