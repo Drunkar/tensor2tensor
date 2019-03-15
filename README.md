@@ -34,7 +34,7 @@ pip install optuna
 
 ### Parameters
 
-name  | description | eample
+name  | description | example
 --|--|--
 optuna_objective| TensorBoard metric name to optimize.| metrics-<problem_name>/targets/accuracy
 optuna_n_trials| Number of trials to search the best result.| 10
