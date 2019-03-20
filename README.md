@@ -58,10 +58,6 @@ def myhparams():
   hparams.learning_rate_schedule = "constant*linear_warmup*rsqrt_decay"
   hparams.learning_rate_constant = 0.1
   hparams.learning_rate_warmup_steps = 16000
-  # determined by optuna
-  hparams.learning_rate_constant = 0.06
-  hparams.filter_size = 2048
-  hparams.num_hidden_layers = 3
   return hparams
 ```
 
